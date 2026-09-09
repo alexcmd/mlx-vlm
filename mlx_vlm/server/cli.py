@@ -280,6 +280,16 @@ def main():
         ),
     )
     parser.add_argument(
+        "--cache-limit-gb",
+        type=float,
+        default=None,
+        help=(
+            "Cap the MLX allocator cache (freed-buffer pool) in GB to bound the "
+            "process peak memory during long prefills. Maps to the "
+            "MLX_VLM_CACHE_LIMIT_GB env var; unset keeps the MLX default."
+        ),
+    )
+    parser.add_argument(
         "--reload",
         action="store_true",
         default=False,
@@ -295,6 +305,8 @@ def main():
     args = parser.parse_args()
     if args.trust_remote_code:
         os.environ["MLX_TRUST_REMOTE_CODE"] = "true"
+    if args.cache_limit_gb is not None:
+        os.environ["MLX_VLM_CACHE_LIMIT_GB"] = str(args.cache_limit_gb)
     if args.model:
         os.environ["MLX_VLM_PRELOAD_MODEL"] = args.model
         if args.adapter_path:

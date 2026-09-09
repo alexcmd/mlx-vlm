@@ -387,8 +387,35 @@ def load_audio_model(model_path: str):
     return load_model(model_path)
 
 
+def _apply_mlx_cache_limit() -> Optional[int]:
+    """Cap the MLX allocator cache from MLX_VLM_CACHE_LIMIT_GB.
+
+    MLX keeps freed buffers around for reuse. During long prefills the
+    chunk logits (~2 GB each) and superseded batch-cache copies accumulate
+    in that cache; without a cap it grew to 15-17 GB on a 27B model and the
+    process footprint peaked at 42 GB with 25 GB of live tensors. A few GB
+    of cache keeps the reuse benefit for decode while bounding the peak.
+    Unset or 0 leaves the MLX default untouched.
+    """
+    raw = os.environ.get("MLX_VLM_CACHE_LIMIT_GB", "").strip()
+    if not raw:
+        return None
+    try:
+        limit_gb = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid MLX_VLM_CACHE_LIMIT_GB=%r", raw)
+        return None
+    if limit_gb <= 0:
+        return None
+    limit = int(limit_gb * (1 << 30))
+    mx.set_cache_limit(limit)
+    logger.info("MLX allocator cache limit set to %.1f GB", limit_gb)
+    return limit
+
+
 @asynccontextmanager
 async def lifespan(app):
+    _apply_mlx_cache_limit()
     model_path = os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
     adapter_path = os.environ.pop("MLX_VLM_PRELOAD_ADAPTER", None)
     if model_path:
