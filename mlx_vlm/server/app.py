@@ -576,6 +576,58 @@ def _audio_cache_group(model_kind: str) -> str:
     return "audio"
 
 
+def _model_alias_enabled() -> bool:
+    return os.environ.get("MLX_VLM_MODEL_ALIAS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _model_is_local(name: str) -> bool:
+    if not name:
+        return False
+    if os.path.exists(os.path.expanduser(name)):
+        return True
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except Exception:  # pragma: no cover - defensive
+        return False
+    return os.path.isdir(
+        os.path.join(HF_HUB_CACHE, "models--" + name.replace("/", "--"))
+    )
+
+
+_aliased_model_names_logged: set = set()
+
+
+def _alias_model_path(model_path: str, model_kind: str = "auto") -> str:
+    """Serve requests for model names that are not available locally with
+    the text model that is already loaded.
+
+    Coding agents ask for the model id baked into their profile or their
+    defaults: an agent's sub-agents request their vendor's cloud model ids,
+    Junie sends the id from its model profile, Continue or
+    Cursor their configured name. Loading that name literally means a
+    HuggingFace download attempt, an HTTP 500 and a client stuck retrying.
+    A name that resolves to a local path or a cached HF repo is honoured as
+    before; anything else maps to the loaded text model.
+    MLX_VLM_MODEL_ALIAS=0 restores the strict behaviour.
+    """
+    if not _model_alias_enabled() or model_kind not in ("auto", "text_generation"):
+        return model_path
+    loaded = _model_cache_registry().for_kind("text_generation").get("cache_key")
+    if not loaded or model_path == loaded[0] or _model_is_local(model_path):
+        return model_path
+    if model_path not in _aliased_model_names_logged:
+        _aliased_model_names_logged.add(model_path)
+        logger.info(
+            "Model %r is not available locally; serving it with %s", model_path, loaded[0]
+        )
+    return loaded[0]
+
+
 def get_cached_model(
     model_path: str,
     adapter_path=_INHERIT_ADAPTER,
@@ -586,6 +638,7 @@ def get_cached_model(
     Factory function to get or load the appropriate model resources from cache or by loading.
     Also creates/updates the ResponseGenerator for continuous batching.
     """
+    model_path = _alias_model_path(model_path, model_kind)
     load_as_edit = model_kind == "image_edit"
     load_as_audio = _audio_model_kind(model_kind)
     load_as_embedding = model_kind == "embedding"
