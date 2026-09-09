@@ -1,3 +1,4 @@
+import contextvars
 import gc
 import logging
 import os
@@ -931,6 +932,15 @@ class CorruptedGenerationError(RuntimeError):
     """Raised by _TokenIterator when a generation degenerates into token 0."""
 
 
+# Per-HTTP-request registry of running generations, so a middleware can
+# cancel them when the client goes away (see DisconnectCancelMiddleware in
+# app.py). Set by the middleware; asyncio.to_thread copies the context, so a
+# _TokenIterator created inside the worker thread still sees it.
+request_cancel_registry: contextvars.ContextVar = contextvars.ContextVar(
+    "mlx_vlm_request_cancel_registry", default=None
+)
+
+
 class _TokenIterator:
     """Closeable iterator over queued tokens for one generation request.
 
@@ -953,6 +963,11 @@ class _TokenIterator:
         )
         self._zero_run = 0
         self._emitted = 0
+        registry = request_cancel_registry.get()
+        if registry is not None:
+            registry.setdefault("cancels", []).append(self.close)
+            if registry.get("disconnected"):
+                self.close()
 
     def __iter__(self):
         return self

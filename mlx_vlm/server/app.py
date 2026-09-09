@@ -30,6 +30,7 @@ from .anthropic import register_routes as register_anthropic_routes
 from .audio import register_routes as register_audio_routes
 from .embeddings import register_routes as register_embeddings_routes
 from .generation import (
+    request_cancel_registry,
     GenerationArguments,
     PromptTooLongError,
     ResponseGenerator,
@@ -513,6 +514,98 @@ inference_router = APIRouter(
     dependencies=[Depends(_require_management_api_key)],
 )
 
+class DisconnectCancelMiddleware:
+    """Cancel generations whose client went away (non-streaming requests).
+
+    Streaming endpoints notice a closed connection when their next write
+    fails; a non-streaming /chat/completions keeps generating to max_tokens
+    after the client has gone. Agent clients (Junie, for one) do not stream,
+    wait a few minutes and retry up to several times, so one slow or stuck
+    request multiplies into a queue of identical ones. Pure ASGI on purpose:
+    BaseHTTPMiddleware proxies the receive channel and never forwards
+    http.disconnect. After the request body has been read this middleware
+    keeps receiving and, on http.disconnect, closes every _TokenIterator the
+    request registered (see generation.request_cancel_registry).
+    MLX_VLM_CANCEL_ON_DISCONNECT=0 disables it.
+    """
+
+    def __init__(self, asgi_app, *, path_suffix: str = "/chat/completions"):
+        self.asgi_app = asgi_app
+        self.path_suffix = path_suffix
+
+    @staticmethod
+    def enabled() -> bool:
+        return os.environ.get("MLX_VLM_CANCEL_ON_DISCONNECT", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") != "http"
+            or not scope.get("path", "").endswith(self.path_suffix)
+            or not self.enabled()
+        ):
+            await self.asgi_app(scope, receive, send)
+            return
+
+        state = {"cancels": [], "disconnected": False, "body_done": False, "done": False}
+        token = request_cancel_registry.set(state)
+
+        def fire():
+            if state["disconnected"] or state["done"]:
+                return
+            state["disconnected"] = True
+            for cancel in list(state["cancels"]):
+                try:
+                    cancel()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if state["cancels"]:
+                logger.info(
+                    "Client disconnected; cancelled %d generation(s)", len(state["cancels"])
+                )
+
+        async def receive_wrapped():
+            message = await receive()
+            if message["type"] == "http.request" and not message.get("more_body", False):
+                state["body_done"] = True
+            elif message["type"] == "http.disconnect":
+                state["body_done"] = True
+                fire()
+            return message
+
+        async def watch_disconnect():
+            try:
+                while not state["body_done"] and not state["done"]:
+                    await asyncio.sleep(0.05)
+                if state["done"]:
+                    return
+                message = await receive()
+                if message["type"] == "http.disconnect" and not state["done"]:
+                    fire()
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        async def send_wrapped(message):
+            if message.get("type") == "http.response.body" and not message.get("more_body", False):
+                state["done"] = True
+            await send(message)
+
+        watcher = asyncio.create_task(watch_disconnect())
+        try:
+            await self.asgi_app(scope, receive_wrapped, send_wrapped)
+        finally:
+            state["done"] = True
+            watcher.cancel()
+            request_cancel_registry.reset(token)
+
+
+app.add_middleware(DisconnectCancelMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
