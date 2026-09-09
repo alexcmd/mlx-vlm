@@ -1,0 +1,11 @@
+{
+  "displayName": "mlx-vlm server via logging proxy 8098",
+  "providerName": "Local",
+  "id": "Qwen3.8-27B-MLX-4bit",
+  "baseUrl": "http://127.0.0.1:8098/v1/chat/completions",
+  "apiType": "OpenAICompletion",
+  "apiKey": "dummy",
+  "temperature": 0.6,
+  "maxContextLength": 150000,
+  "extraBody": {"enable_thinking": false}
+}

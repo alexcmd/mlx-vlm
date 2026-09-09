@@ -1,0 +1,11 @@
+{
+  "displayName": "Junie Local engine via logging proxy 8097",
+  "providerName": "Local",
+  "id": "Qwen3.8-27B-MLX-4bit",
+  "baseUrl": "http://127.0.0.1:8097/v1/chat/completions",
+  "apiType": "OpenAICompletion",
+  "apiKey": "<api_key from ~/.local/share/junie-local/server-config.json>",
+  "temperature": 0.6,
+  "maxContextLength": 150000,
+  "extraBody": {"enable_thinking": false}
+}
