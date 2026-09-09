@@ -416,6 +416,13 @@ def _apply_mlx_cache_limit() -> Optional[int]:
 @asynccontextmanager
 async def lifespan(app):
     _apply_mlx_cache_limit()
+    apc_hybrid = os.environ.get("MLX_VLM_APC_HYBRID", "")
+    if apc_hybrid.lower() in ("1", "true", "yes", "on"):
+        from ..apc_hybrid import install as _install_apc_hybrid
+
+        _install_apc_hybrid()
+        logger.info("Hybrid APC (KV blocks + recurrent-state checkpoint ladder) installed.")
+
     model_path = os.environ.pop("MLX_VLM_PRELOAD_MODEL", None)
     adapter_path = os.environ.pop("MLX_VLM_PRELOAD_ADAPTER", None)
     if model_path:
