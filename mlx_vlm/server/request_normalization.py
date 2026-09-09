@@ -19,6 +19,10 @@ from .generation import (
 from .runtime import runtime
 
 _DISABLED_REASONING_EFFORTS = {"none", "off", "disabled", "false", "0"}
+# Qwen3.5-style chat templates only accept low/medium/xhigh and raise on
+# anything else, while "high" is the default many OpenAI clients send and
+# "minimal" is a valid OpenAI level. Map them onto the nearest known level.
+_REASONING_EFFORT_ALIASES = {"high": "xhigh", "minimal": "low", "none": "low"}
 
 
 def _request_field_is_set(request, field_name: str) -> bool:
@@ -45,7 +49,8 @@ def _reasoning_effort_enabled(effort) -> Tuple[Optional[bool], Optional[str]]:
     normalized = str(effort).strip().lower()
     if not normalized:
         return None, None
-    return normalized not in _DISABLED_REASONING_EFFORTS, normalized
+    enabled = normalized not in _DISABLED_REASONING_EFFORTS
+    return enabled, _REASONING_EFFORT_ALIASES.get(normalized, normalized)
 
 
 def _standard_reasoning_control(
