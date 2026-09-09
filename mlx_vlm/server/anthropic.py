@@ -2,6 +2,7 @@ import asyncio
 import gc
 import json
 import logging
+import os
 import time
 import traceback
 import uuid
@@ -380,14 +381,33 @@ def _anthropic_messages_to_internal(
     return processed_messages, images, tools, tool_choice
 
 
+def _adaptive_thinking_enables() -> bool:
+    """Whether ``thinking: {"type": "adaptive"}`` forces thinking on.
+
+    Coding-agent clients send ``adaptive`` on every request. Treating it as
+    ``enabled`` makes the model think on every tool call; by default it now
+    means "let the server decide" (the configured thinking default). Set
+    ``MLX_VLM_ADAPTIVE_THINKING=1`` to restore the old behaviour.
+    """
+    return os.environ.get("MLX_VLM_ADAPTIVE_THINKING", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _anthropic_request_with_derived_fields(
     request: AnthropicRequest,
 ) -> AnthropicRequest:
     thinking = _as_plain_dict(request.thinking)
     if request.enable_thinking is None and isinstance(thinking, dict):
         thinking_type = thinking.get("type")
-        if thinking_type in ("enabled", "adaptive"):
+        if thinking_type == "enabled":
             request.enable_thinking = True
+        elif thinking_type == "adaptive":
+            if _adaptive_thinking_enables():
+                request.enable_thinking = True
         elif thinking_type == "disabled":
             request.enable_thinking = False
     if request.thinking_budget is None and isinstance(thinking, dict):
