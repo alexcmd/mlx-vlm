@@ -910,14 +910,37 @@ def _diffusion_block_chunks(results) -> "Generator[StreamingToken, None, None]":
                 return
 
 
+def get_max_zero_token_run() -> int:
+    """Consecutive token-id-0 chunks after which a request is aborted.
+
+    A corrupted serving state (zeroed or NaN logits whose argmax is id 0)
+    shows up as an endless run of token 0 ("!!!!" on most tokenizers) that
+    otherwise continues to max_tokens - 32k tokens at full speed for agent
+    clients - while the client waits and then retries on top of it.
+    MLX_VLM_MAX_ZERO_TOKEN_RUN sets the threshold (default 8); 0 disables
+    the guard.
+    """
+    raw = os.environ.get("MLX_VLM_MAX_ZERO_TOKEN_RUN", "8").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 8
+
+
+class CorruptedGenerationError(RuntimeError):
+    """Raised by _TokenIterator when a generation degenerates into token 0."""
+
+
 class _TokenIterator:
     """Closeable iterator over queued tokens for one generation request.
 
     close() cancels unfinished requests and is safe while another thread is
-    blocked in __next__ waiting for the next token.
+    blocked in __next__ waiting for the next token. A run of token id 0
+    longer than get_max_zero_token_run() aborts the request with
+    CorruptedGenerationError instead of streaming garbage to max_tokens.
     """
 
-    def __init__(self, rqueue, uid, cancel_fn, queue_timeout):
+    def __init__(self, rqueue, uid, cancel_fn, queue_timeout, max_zero_run=None):
         self._rqueue = rqueue
         self._uid = uid
         self._cancel_fn = cancel_fn
@@ -925,6 +948,11 @@ class _TokenIterator:
         self._ended = False
         self._closed = False
         self._lock = Lock()
+        self._max_zero_run = (
+            get_max_zero_token_run() if max_zero_run is None else int(max_zero_run)
+        )
+        self._zero_run = 0
+        self._emitted = 0
 
     def __iter__(self):
         return self
@@ -956,7 +984,31 @@ class _TokenIterator:
             raise item
         if getattr(item, "finish_reason", None):
             self._ended = True
+        self._check_zero_run(item)
         return item
+
+    def _check_zero_run(self, item) -> None:
+        if self._max_zero_run <= 0:
+            return
+        n = int(getattr(item, "token_count", 1) or 1)
+        self._emitted += n
+        if getattr(item, "token", None) == 0 and not getattr(item, "finish_reason", None):
+            self._zero_run += n
+        else:
+            self._zero_run = 0
+        if self._zero_run >= self._max_zero_run:
+            logger.error(
+                "Corrupted generation: %d consecutive token id 0 after %d tokens; "
+                "cancelling request %s",
+                self._zero_run,
+                self._emitted,
+                self._uid,
+            )
+            self.close()  # cancels the request (must run before _ended is set)
+            self._ended = True
+            raise CorruptedGenerationError(
+                f"corrupted generation: {self._zero_run} consecutive token id 0"
+            )
 
     def close(self):
         with self._lock:
